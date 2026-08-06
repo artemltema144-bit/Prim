@@ -28,7 +28,7 @@ import {
 } from 'lucide-react';
 import canvasConfetti from 'canvas-confetti';
 import type { BankUser, BankInvoice, Product } from './supabaseClient';
-import { getProducts, addProduct } from './productService';
+import { getProducts, addProduct, deleteProduct } from './productService';
 import { findUserByPassport, createInvoice, startPollingInvoice, getSellerInvoices, cancelInvoice } from './bankService';
 
 // PromIn - Пром Ирновии
@@ -220,6 +220,19 @@ export default function App() {
     setLoadingSellerInvoices(false);
   }
 
+  // Handle Delete Product by Seller
+  async function handleDeleteProduct(productId: string) {
+    if (!window.confirm("Вы действительно хотите окончательно удалить этот товар из продажи на маркетплейсе?")) {
+      return;
+    }
+    setLoading(true);
+    await deleteProduct(productId);
+    const updated = await getProducts();
+    setProducts(updated);
+    setLoading(false);
+    alert("Товар успешно удален с продажи!");
+  }
+
   // Handle login
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -301,7 +314,6 @@ export default function App() {
 
   // Handle Free Cloud Image Upload (ImgBB) with ultra-reliable Base64 & size compression fallback
   async function compressAndUploadImage(file: File): Promise<string> {
-    // 1. Convert to compressed, resized JPEG to keep it extremely small (<100KB) and load blazingly fast
     const compressedBase64 = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = (event) => {
@@ -311,7 +323,6 @@ export default function App() {
           let width = img.width;
           let height = img.height;
 
-          // Limit width/height to max 600px to maintain tiny payload size
           const MAX_SIZE = 600;
           if (width > height) {
             if (width > MAX_SIZE) {
@@ -330,7 +341,6 @@ export default function App() {
           const ctx = canvas.getContext('2d');
           if (ctx) {
             ctx.drawImage(img, 0, 0, width, height);
-            // Compress image quality down to 0.6
             resolve(canvas.toDataURL('image/jpeg', 0.6));
           } else {
             resolve(event.target?.result as string);
@@ -343,10 +353,8 @@ export default function App() {
       reader.readAsDataURL(file);
     });
 
-    // 2. Try to upload to ImgBB
     try {
       const formData = new FormData();
-      // ImgBB supports base64 parameter directly! We just strip the metadata prefix
       const base64Clean = compressedBase64.split(',')[1];
       formData.append('image', base64Clean);
 
@@ -359,11 +367,10 @@ export default function App() {
         return data.data.url;
       }
     } catch (err) {
-      console.warn("ImgBB upload failed, falling back to other free cloud providers:", err);
+      console.warn("ImgBB upload failed:", err);
     }
 
-    // 3. Try fallback to freeimage.host API or use raw compressed base64 directly
-    // Base64 is 100% reliable, runs entirely on client side, doesn't depend on CORS or network limits, and works everywhere!
+    // Fallback to pure base64 compressed data URL (100% stable client-side)
     return compressedBase64;
   }
 
@@ -902,6 +909,48 @@ export default function App() {
                     </button>
                   </div>
                 </form>
+
+                {/* ACTIVE SELLER PRODUCTS FOR DELETION */}
+                {sellerPassport.trim() && (
+                  <div className="mt-10 pt-6 border-t border-slate-200">
+                    <h3 className="font-extrabold text-slate-800 text-lg flex items-center gap-2 mb-4">
+                      <Package className="w-5 h-5 text-purple-700" /> Ваши активные товары в продаже ({products.filter(p => p.seller_passport.trim() === sellerPassport.trim() && !p.id.startsWith('seed-')).length})
+                    </h3>
+
+                    {products.filter(p => p.seller_passport.trim() === sellerPassport.trim() && !p.id.startsWith('seed-')).length === 0 ? (
+                      <p className="text-xs text-slate-400 font-semibold italic bg-slate-50 p-4 rounded-lg border border-slate-100 text-center">
+                        У вас пока нет активных товаров в продаже. Заполните форму выше, чтобы добавить свой первый товар!
+                      </p>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                        {products.filter(p => p.seller_passport.trim() === sellerPassport.trim() && !p.id.startsWith('seed-')).map(p => {
+                          const imgs = parseProductImages(p.image_url);
+                          return (
+                            <div key={p.id} className="bg-slate-50 border border-slate-200 rounded-lg p-3 flex gap-3 relative shadow-sm hover:shadow-md transition">
+                              <img src={imgs[0]} alt={p.name} className="w-16 h-16 object-cover rounded bg-white border border-slate-200 flex-shrink-0" />
+                              <div className="flex-grow flex flex-col justify-between overflow-hidden">
+                                <div>
+                                  <p className="text-xs font-bold text-slate-800 truncate">{p.name}</p>
+                                  <p className="text-xs text-purple-700 font-bold mt-0.5">{p.price.toLocaleString()} {"}|{"}</p>
+                                  <p className="text-[10px] text-slate-400 mt-0.5 font-medium">{p.category}</p>
+                                </div>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteProduct(p.id)}
+                                  className="mt-2 bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 p-1.5 rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-all"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Удалить товар</span>
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               /* SELLER DASHBOARD - TAB: MANAGE ORDERS (REAL-TIME DB QUERIES) */

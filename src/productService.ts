@@ -196,3 +196,24 @@ function saveLocalProduct(product: Product): Product {
   localStorage.setItem('promin_products', JSON.stringify(updated));
   return product;
 }
+
+export async function deleteProduct(productId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('marketplace_products')
+      .delete()
+      .eq('id', productId);
+
+    if (error) {
+      console.warn("Failed to delete product from Supabase, removing locally:", error.message);
+    }
+  } catch (err) {
+    console.warn("Supabase deletion failed, removing locally:", err);
+  }
+
+  // Always sync local storage by removing it
+  const current = getLocalProducts();
+  const updated = current.filter((p) => p.id !== productId);
+  localStorage.setItem('promin_products', JSON.stringify(updated));
+  return true;
+}
