@@ -106,3 +106,40 @@ export function startPollingInvoice(
     }
   };
 }
+
+export async function getSellerInvoices(sellerPassport: string): Promise<BankInvoice[]> {
+  try {
+    const { data, error } = await supabase
+      .from('bank_invoices')
+      .select('*')
+      .eq('sender_passport', sellerPassport.trim())
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error("Error fetching seller invoices:", error.message);
+      return [];
+    }
+    return data as BankInvoice[];
+  } catch (err) {
+    console.error("Exception fetching seller invoices:", err);
+    return [];
+  }
+}
+
+export async function cancelInvoice(invoiceId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('bank_invoices')
+      .update({ status: 'cancelled' })
+      .eq('id', invoiceId);
+
+    if (error) {
+      console.error("Error cancelling invoice:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("Exception cancelling invoice:", err);
+    return false;
+  }
+}

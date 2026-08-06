@@ -20,14 +20,16 @@ import {
   ChevronRight as ChevronRightIcon,
   ShieldCheck,
   Package,
-  Sparkles,
-  Info
+  Info,
+  MapPin,
+  Upload,
+  RefreshCw,
+  XCircle
 } from 'lucide-react';
 import canvasConfetti from 'canvas-confetti';
-import { supabase } from './supabaseClient';
 import type { BankUser, BankInvoice, Product } from './supabaseClient';
 import { getProducts, addProduct } from './productService';
-import { findUserByPassport, createInvoice, startPollingInvoice } from './bankService';
+import { findUserByPassport, createInvoice, startPollingInvoice, getSellerInvoices, cancelInvoice } from './bankService';
 
 // PromIn - Пром Ирновии
 // Purple: #522b82
@@ -59,6 +61,7 @@ export default function App() {
   const [checkoutName, setCheckoutName] = useState('');
   const [checkoutPhone, setCheckoutPhone] = useState('');
   const [checkoutPassport, setCheckoutPassport] = useState('');
+  const [checkoutCoordinates, setCheckoutCoordinates] = useState('');
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [createdInvoice, setCreatedInvoice] = useState<BankInvoice | null>(null);
@@ -66,19 +69,30 @@ export default function App() {
   const [paymentSuccess, setPaymentSuccess] = useState(false);
   const [paymentBuyerName, setPaymentBuyerName] = useState('');
 
-  // Seller Portal States
+  // Seller Dashboard States
   const [newProdName, setNewProdName] = useState('');
   const [newProdPrice, setNewProdPrice] = useState('');
   const [newProdCategory, setNewProdCategory] = useState('Автомобили и мото');
-  const [newProdImage, setNewProdImage] = useState('');
   const [newProdDesc, setNewProdDesc] = useState('');
   const [sellerPassport, setSellerPassport] = useState('');
   const [sellerError, setSellerError] = useState<string | null>(null);
   const [sellerSuccess, setSellerSuccess] = useState(false);
   const [sellerAdding, setSellerAdding] = useState(false);
 
+  // Seller Dashboard Order Management States
+  const [sellerDashboardTab, setSellerDashboardTab] = useState<'add_product' | 'orders'>('add_product');
+  const [sellerInvoices, setSellerInvoices] = useState<BankInvoice[]>([]);
+  const [loadingSellerInvoices, setLoadingSellerInvoices] = useState(false);
+
+  // Image Upload States
+  const [uploadedImages, setUploadedImages] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+
   // Banner Carousel Index
   const [bannerIndex, setBannerIndex] = useState(0);
+
+  // Product Details Slideshow Index
+  const [detailsImgIndex, setDetailsImgIndex] = useState(0);
 
   const categories = [
     "Автомобили и мото",
@@ -133,6 +147,7 @@ export default function App() {
     if (savedUser) {
       try {
         setUser(JSON.parse(savedUser));
+        setSellerPassport(JSON.parse(savedUser).passport_code); // Pre-fill seller passport code
       } catch {
         // ignore
       }
@@ -154,6 +169,57 @@ export default function App() {
     localStorage.setItem('promin_cart', JSON.stringify(cart));
   }, [cart]);
 
+  // Reset product details image index when product changes
+  useEffect(() => {
+    setDetailsImgIndex(0);
+  }, [selectedProduct]);
+
+  // Helper to parse image URL field
+  function parseProductImages(imageUrlString: string): string[] {
+    try {
+      const parsed = JSON.parse(imageUrlString);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    } catch {
+      // not a JSON string, fallback to standard parsing
+    }
+    return imageUrlString ? [imageUrlString] : ["https://images.unsplash.com/photo-1546213290-e1b7610339e5?auto=format&fit=crop&w=600&q=80"];
+  }
+
+  // Load seller invoices when tab switches to orders or sellerPassport changes
+  useEffect(() => {
+    if (isSellerDashboard && sellerDashboardTab === 'orders' && sellerPassport.trim()) {
+      loadSellerOrders();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSellerDashboard, sellerDashboardTab, sellerPassport]);
+
+  async function loadSellerOrders() {
+    if (!sellerPassport.trim()) return;
+    setLoadingSellerInvoices(true);
+    const invoices = await getSellerInvoices(sellerPassport);
+    setSellerInvoices(invoices);
+    setLoadingSellerInvoices(false);
+  }
+
+  // Handle Cancel/Refund of order by Seller
+  async function handleDeclineOrder(invoiceId: string) {
+    if (!window.confirm("Вы действительно хотите отказаться от заказа? Средства будут мгновенно возвращены покупателю в Нацбанке Ирновии.")) {
+      return;
+    }
+
+    setLoadingSellerInvoices(true);
+    const success = await cancelInvoice(invoiceId);
+    if (success) {
+      alert("Заказ успешно отменен. Статус счета изменен на 'cancelled', деньги автоматически возвращены на счет покупателя.");
+      await loadSellerOrders();
+    } else {
+      alert("Не удалось изменить статус счета в базе данных Нацбанка.");
+    }
+    setLoadingSellerInvoices(false);
+  }
+
   // Handle login
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -169,6 +235,7 @@ export default function App() {
     const citizen = await findUserByPassport(authPassport);
     if (citizen) {
       setUser(citizen);
+      setSellerPassport(citizen.passport_code); // Sync seller passport
       localStorage.setItem('promin_user', JSON.stringify(citizen));
       setIsAuthModalOpen(false);
       setAuthPassport('');
@@ -181,11 +248,14 @@ export default function App() {
   function handleLogout() {
     setUser(null);
     localStorage.removeItem('promin_user');
+    setSellerPassport('');
     setIsSellerDashboard(false);
   }
 
   // Shopping Cart Actions
   function addToCart(product: Product) {
+    if (product.id.startsWith('seed-')) return; // Block decorative products
+
     setCart((prev) => {
       const existing = prev.find((item) => item.product.id === product.id);
       if (existing) {
@@ -229,14 +299,56 @@ export default function App() {
     }
   }, [user]);
 
+  // Handle Free Cloud Image Upload (ImgBB)
+  async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    if (!e.target.files || e.target.files.length === 0) return;
+    setUploading(true);
+    setSellerError(null);
+
+    const filesToUpload = Array.from(e.target.files).slice(0, 4 - uploadedImages.length);
+    const uploadedUrls: string[] = [];
+
+    for (const file of filesToUpload) {
+      const formData = new FormData();
+      formData.append('image', file);
+
+      try {
+        // Free cloud uploader using ImgBB API
+        const res = await fetch('https://api.imgbb.com/1/upload?key=60bd34c065604854e1eec5b2e28a4544', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        if (data && data.success) {
+          uploadedUrls.push(data.data.url);
+        } else {
+          console.warn("Upload failed:", data?.error?.message);
+        }
+      } catch (err) {
+        console.error("Error uploading to cloud:", err);
+      }
+    }
+
+    if (uploadedUrls.length > 0) {
+      setUploadedImages((prev) => [...prev, ...uploadedUrls].slice(0, 4));
+    } else {
+      setSellerError("Ошибка при загрузке изображений на безплатное облако. Попробуйте еще раз.");
+    }
+    setUploading(false);
+  }
+
+  function removeUploadedImage(index: number) {
+    setUploadedImages((prev) => prev.filter((_, i) => i !== index));
+  }
+
   // Checkout and Invoice creation
   async function handleCheckout(e: React.FormEvent) {
     e.preventDefault();
     setCheckoutError(null);
     setCheckoutLoading(true);
 
-    if (!checkoutName.trim() || !checkoutPhone.trim() || !checkoutPassport.trim()) {
-      setCheckoutError("Пожалуйста, заполните все поля.");
+    if (!checkoutName.trim() || !checkoutPhone.trim() || !checkoutPassport.trim() || !checkoutCoordinates.trim()) {
+      setCheckoutError("Пожалуйста, заполните все поля, включая координаты доставки.");
       setCheckoutLoading(false);
       return;
     }
@@ -257,12 +369,12 @@ export default function App() {
     const primaryProduct = cart[0]?.product;
     const sellerPassportCode = primaryProduct?.seller_passport || "Т•01•180426•814";
 
-    // 3. Create Invoice
+    // 3. Create Invoice containing Delivery Coordinates
     const invoice = await createInvoice(
       sellerPassportCode,
       checkoutPassport,
       cartTotal,
-      `Оплата заказа на Пром Ирновии (${cart.map(i => `${i.product.name} x${i.quantity}`).join(', ').substring(0, 80)})`
+      `Оплата заказа на Пром Ирновии. Координаты доставки: ${checkoutCoordinates.trim()} (${cart.map(i => `${i.product.name} x${i.quantity}`).join(', ').substring(0, 60)})`
     );
 
     if (!invoice) {
@@ -295,7 +407,7 @@ export default function App() {
       } else if (status === 'cancelled') {
         stopPolling();
         setPaymentPolling(false);
-        setCheckoutError("Счет был отклонен в приложении Нацбанка.");
+        setCheckoutError("Счет был отклонен или отменен продавцом.");
         setCreatedInvoice(null);
       }
     });
@@ -316,6 +428,12 @@ export default function App() {
       return;
     }
 
+    if (uploadedImages.length === 0) {
+      setSellerError("Пожалуйста, загрузите хотя бы 1 изображение вашего товара (максимум 4).");
+      setSellerAdding(false);
+      return;
+    }
+
     // Verify Seller Passport
     const isSellerValid = await findUserByPassport(sellerPassport);
     if (!isSellerValid) {
@@ -331,7 +449,8 @@ export default function App() {
       return;
     }
 
-    const imgUrl = newProdImage.trim() || "https://images.unsplash.com/photo-1546213290-e1b7610339e5?auto=format&fit=crop&w=600&q=80"; // fallback
+    // Store up to 4 cloud URLs as a JSON string
+    const imgUrlField = JSON.stringify(uploadedImages);
 
     try {
       await addProduct({
@@ -339,7 +458,7 @@ export default function App() {
         description: newProdDesc.trim(),
         price: priceNum,
         category: newProdCategory,
-        image_url: imgUrl,
+        image_url: imgUrlField,
         seller_passport: sellerPassport.trim()
       });
 
@@ -347,8 +466,8 @@ export default function App() {
       // Reset form
       setNewProdName('');
       setNewProdPrice('');
-      setNewProdImage('');
       setNewProdDesc('');
+      setUploadedImages([]);
 
       // Reload products
       const updatedProds = await getProducts();
@@ -377,22 +496,6 @@ export default function App() {
     activeTab === 'popular' ? popularProducts :
     activeTab === 'discounts' ? discountProducts :
     newProducts;
-
-  // Sandbox helper: Automatically approve invoice
-  async function simulatePaymentSuccess() {
-    if (!createdInvoice) return;
-    try {
-      const { error } = await supabase
-        .from('bank_invoices')
-        .update({ status: 'paid' })
-        .eq('id', createdInvoice.id);
-      if (error) {
-        console.error("Simulation failed:", error.message);
-      }
-    } catch (err) {
-      console.error("Simulation request error:", err);
-    }
-  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans antialiased flex flex-col">
@@ -550,8 +653,8 @@ export default function App() {
 
         {/* VIEW: SELLER DASHBOARD */}
         {isSellerDashboard ? (
-          <div className="bg-white rounded-xl shadow-md border border-slate-100 p-6 max-w-3xl mx-auto">
-            <div className="flex items-center justify-between mb-6 pb-4 border-b border-slate-100">
+          <div className="bg-white rounded-xl shadow-md border border-slate-100 p-6 max-w-4xl mx-auto">
+            <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-150">
               <h2 className="text-xl md:text-2xl font-black text-slate-800 flex items-center gap-2">
                 <Store className="w-6 h-6 text-[#522b82]" /> Кабинет продавца PromIn
               </h2>
@@ -563,123 +666,291 @@ export default function App() {
               </button>
             </div>
 
-            <div className="bg-purple-50 text-purple-900 p-4 rounded-lg mb-6 flex gap-3 text-sm border border-purple-100">
-              <Info className="w-5 h-5 flex-shrink-0" />
-              <div>
-                <p className="font-bold">Как продавать на Пром Ирновии?</p>
-                <p className="mt-1">Для добавления ваших товаров вам необходим зарегистрированный паспорт гражданина Ирновии. Платежи от покупателей будут поступать прямо на ваш счет в Национальном Банке Ирновии.</p>
-              </div>
-            </div>
-
-            <form onSubmit={handleAddProduct} className="space-y-4">
-              {sellerError && (
-                <div className="bg-red-50 border border-red-200 text-red-700 p-3.5 rounded-lg flex gap-2 text-sm font-medium">
-                  <AlertCircle className="w-5 h-5 flex-shrink-0" />
-                  <span>{sellerError}</span>
-                </div>
-              )}
-              {sellerSuccess && (
-                <div className="bg-green-50 border border-green-200 text-green-700 p-3.5 rounded-lg flex gap-2 text-sm font-medium">
-                  <CheckCircle className="w-5 h-5 flex-shrink-0" />
-                  <span>Товар успешно зарегистрирован в базе данных маркетплейса! Покупатели уже могут его увидеть.</span>
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Ваш код паспорта (продавец) *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Пример: C•01•191125•001"
-                    value={sellerPassport}
-                    onChange={(e) => setSellerPassport(e.target.value)}
-                    className="w-full border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Название товара *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Например: Стул дизайнерский"
-                    value={newProdName}
-                    onChange={(e) => setNewProdName(e.target.value)}
-                    className="w-full border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Цена в Жоронах (целое число) *</label>
-                  <input
-                    type="number"
-                    required
-                    min="1"
-                    placeholder="Пример: 1200"
-                    value={newProdPrice}
-                    onChange={(e) => setNewProdPrice(e.target.value)}
-                    className="w-full border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Категория товара *</label>
-                  <select
-                    value={newProdCategory}
-                    onChange={(e) => setNewProdCategory(e.target.value)}
-                    className="w-full border border-slate-200 rounded-lg p-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
-                  >
-                    {categories.map((c) => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Ссылка на изображение товара</label>
+            {/* SELLER IDENTITY INPUT (Passport Required for both functions) */}
+            <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6 flex flex-col md:flex-row gap-4 items-end md:items-center justify-between">
+              <div className="flex-1">
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Паспорт продавца Ирновии (для управления товарами и заказами) *
+                </label>
                 <input
-                  type="url"
-                  placeholder="Пример: https://images.unsplash.com/... (Оставьте пустым для авто-выбора)"
-                  value={newProdImage}
-                  onChange={(e) => setNewProdImage(e.target.value)}
-                  className="w-full border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
+                  type="text"
+                  placeholder="Пример: Т•01•180426•814"
+                  value={sellerPassport}
+                  onChange={(e) => setSellerPassport(e.target.value)}
+                  className="w-full max-w-md border border-slate-200 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-purple-400 font-mono font-bold"
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Описание товара *</label>
-                <textarea
-                  required
-                  rows={4}
-                  placeholder="Опишите характеристики, размеры, состояние и условия поставки товара..."
-                  value={newProdDesc}
-                  onChange={(e) => setNewProdDesc(e.target.value)}
-                  className="w-full border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
-                ></textarea>
-              </div>
+              {/* SUB-TABS TO SWITCH BETWEEN ADD_PRODUCT AND MANAGE ORDERS */}
+              {sellerPassport.trim() && (
+                <div className="flex bg-slate-200 rounded-lg p-1 text-xs font-bold text-slate-500 self-start md:self-auto shadow-inner">
+                  <button
+                    onClick={() => setSellerDashboardTab('add_product')}
+                    className={`px-4 py-2 rounded-md transition-all ${sellerDashboardTab === 'add_product' ? 'bg-white text-[#522b82] shadow-sm' : 'hover:text-slate-800'}`}
+                  >
+                    Выставить товар
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSellerDashboardTab('orders');
+                      loadSellerOrders();
+                    }}
+                    className={`px-4 py-2 rounded-md transition-all flex items-center gap-1.5 ${sellerDashboardTab === 'orders' ? 'bg-white text-[#522b82] shadow-sm' : 'hover:text-slate-800'}`}
+                  >
+                    <Package className="w-3.5 h-3.5" />
+                    <span>Управление заказами</span>
+                  </button>
+                </div>
+              )}
+            </div>
 
-              <div className="pt-2">
-                <button
-                  type="submit"
-                  disabled={sellerAdding}
-                  className="w-full bg-[#522b82] text-white py-3 rounded-lg font-bold hover:bg-purple-900 active:bg-purple-950 transition-all shadow-md flex items-center justify-center gap-2 disabled:bg-slate-300 disabled:cursor-not-allowed text-base"
-                >
-                  {sellerAdding ? (
-                    <>
-                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                      <span>Регистрация товара...</span>
-                    </>
-                  ) : (
-                    <>
-                      <PlusCircle className="w-5 h-5" />
-                      <span>Выставить товар на продажу</span>
-                    </>
+            {/* SELLER DASHBOARD - TAB: ADD PRODUCT */}
+            {sellerDashboardTab === 'add_product' ? (
+              <div className="space-y-4">
+                <div className="bg-purple-50 text-purple-900 p-4 rounded-lg flex gap-3 text-sm border border-purple-100">
+                  <Info className="w-5 h-5 flex-shrink-0 text-[#522b82]" />
+                  <div>
+                    <p className="font-bold">Как выставить свои товары?</p>
+                    <p className="mt-1">
+                      Заполните форму ниже.
+                      Вы можете загрузить **до 4 фотографий** вашего товара прямо к нам на сайт! Мы бесплатно сохраним их в облаке.
+                    </p>
+                  </div>
+                </div>
+
+                <form onSubmit={handleAddProduct} className="space-y-4">
+                  {sellerError && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 p-3.5 rounded-lg flex gap-2 text-sm font-medium">
+                      <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                      <span>{sellerError}</span>
+                    </div>
                   )}
-                </button>
+                  {sellerSuccess && (
+                    <div className="bg-green-50 border border-green-200 text-green-700 p-3.5 rounded-lg flex gap-2 text-sm font-medium">
+                      <CheckCircle className="w-5 h-5 flex-shrink-0" />
+                      <span>Ваш товар успешно зарегистрирован и выставлен на продажу с реальными фотографиями из облака!</span>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Название товара *</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="Например: Стул дизайнерский"
+                        value={newProdName}
+                        onChange={(e) => setNewProdName(e.target.value)}
+                        className="w-full border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Категория товара *</label>
+                      <select
+                        value={newProdCategory}
+                        onChange={(e) => setNewProdCategory(e.target.value)}
+                        className="w-full border border-slate-200 rounded-lg p-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
+                      >
+                        {categories.map((c) => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Цена в Жоронах (целое число) *</label>
+                      <input
+                        type="number"
+                        required
+                        min="1"
+                        placeholder="Пример: 1200"
+                        value={newProdPrice}
+                        onChange={(e) => setNewProdPrice(e.target.value)}
+                        className="w-full border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
+                      />
+                    </div>
+
+                    {/* CLOUD MULTI-IMAGE UPLOADER (UP TO 4 PHOTOS) */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
+                        ФОТОГРАФИИ ТОВАРA (до 4 шт.) *
+                      </label>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 border border-slate-200 p-2 rounded-lg bg-slate-50">
+                        {uploadedImages.map((img, idx) => (
+                          <div key={idx} className="relative h-14 bg-white border border-slate-200 rounded-md overflow-hidden group shadow-sm">
+                            <img src={img} alt="Preview" className="w-full h-full object-cover" />
+                            <button
+                              type="button"
+                              onClick={() => removeUploadedImage(idx)}
+                              className="absolute top-0.5 right-0.5 bg-red-600 text-white rounded-full p-0.5 opacity-90 hover:opacity-100 hover:scale-105 shadow-md transition"
+                            >
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          </div>
+                        ))}
+
+                        {uploadedImages.length < 4 && (
+                          <label className="border-2 border-dashed border-slate-300 hover:border-[#522b82] hover:bg-purple-50/50 rounded-md h-14 flex flex-col items-center justify-center cursor-pointer transition p-1 text-center text-[10px] font-bold text-slate-500 group">
+                            {uploading ? (
+                              <div className="w-4 h-4 border-2 border-[#522b82] border-t-transparent rounded-full animate-spin"></div>
+                            ) : (
+                              <Upload className="w-4 h-4 text-slate-400 group-hover:text-[#522b82]" />
+                            )}
+                            <span>Загрузить</span>
+                            <input
+                              type="file"
+                              multiple
+                              accept="image/*"
+                              disabled={uploading}
+                              onChange={handleImageUpload}
+                              className="hidden"
+                            />
+                          </label>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Описание товара *</label>
+                    <textarea
+                      required
+                      rows={4}
+                      placeholder="Опишите характеристики, размеры, состояние и условия поставки товара..."
+                      value={newProdDesc}
+                      onChange={(e) => setNewProdDesc(e.target.value)}
+                      className="w-full border border-slate-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-purple-400 font-medium"
+                    ></textarea>
+                  </div>
+
+                  <div className="pt-2">
+                    <button
+                      type="submit"
+                      disabled={sellerAdding || uploading}
+                      className="w-full bg-[#522b82] text-white py-3 rounded-lg font-bold hover:bg-purple-900 active:bg-purple-950 transition-all shadow-md flex items-center justify-center gap-2 disabled:bg-slate-300 disabled:cursor-not-allowed text-base"
+                    >
+                      {sellerAdding ? (
+                        <>
+                          <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          <span>Регистрация товара...</span>
+                        </>
+                      ) : (
+                        <>
+                          <PlusCircle className="w-5 h-5" />
+                          <span>Выставить товар на продажу</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
               </div>
-            </form>
+            ) : (
+              /* SELLER DASHBOARD - TAB: MANAGE ORDERS (REAL-TIME DB QUERIES) */
+              <div className="space-y-4">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                  <h3 className="font-extrabold text-slate-800 text-lg flex items-center gap-2">
+                    <Package className="w-5 h-5 text-purple-700" /> Поступившие заказы и платежи ({sellerInvoices.length})
+                  </h3>
+                  <button
+                    onClick={loadSellerOrders}
+                    disabled={loadingSellerInvoices}
+                    className="p-1.5 px-3 bg-purple-50 text-[#522b82] hover:bg-purple-100 border border-purple-100 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingSellerInvoices ? 'animate-spin' : ''}`} />
+                    <span>Обновить список</span>
+                  </button>
+                </div>
+
+                {!sellerPassport.trim() ? (
+                  <p className="text-sm font-semibold text-slate-400">Пожалуйста, укажите код паспорта в поле выше для загрузки заказов.</p>
+                ) : loadingSellerInvoices ? (
+                  <div className="flex flex-col items-center justify-center py-16 space-y-3">
+                    <div className="w-10 h-10 border-4 border-[#522b82] border-t-transparent rounded-full animate-spin"></div>
+                    <p className="text-xs text-slate-500 font-semibold">Сверка входящих счетов в реестре Национального Банка...</p>
+                  </div>
+                ) : sellerInvoices.length === 0 ? (
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-12 text-center text-slate-500">
+                    <Package className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                    <p className="font-bold text-slate-700 text-sm">У вас пока нет заказов</p>
+                    <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">Как только покупатели выберут ваши товары и нажмут кнопку оплаты, их счета появятся здесь в реальном времени.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {sellerInvoices.map((inv) => (
+                      <div key={inv.id} className="bg-white border border-slate-200 hover:border-slate-300 p-4 rounded-xl shadow-sm space-y-3 transition duration-200">
+                        {/* Title Row */}
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-slate-100 pb-2.5">
+                          <div>
+                            <span className="text-[10px] text-slate-400 uppercase font-black tracking-wider">ID Заказа (Счета)</span>
+                            <p className="font-mono text-xs font-bold text-slate-700">{inv.id}</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {inv.status === 'pending' && (
+                              <span className="bg-amber-100 text-amber-800 border border-amber-200 text-[10px] font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider flex items-center gap-1">
+                                <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse"></span>
+                                Ожидает оплаты
+                              </span>
+                            )}
+                            {inv.status === 'paid' && (
+                              <span className="bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider flex items-center gap-1">
+                                <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>
+                                Оплачен покупателем
+                              </span>
+                            )}
+                            {inv.status === 'cancelled' && (
+                              <span className="bg-red-100 text-red-800 border border-red-200 text-[10px] font-extrabold px-2.5 py-1 rounded-full uppercase tracking-wider flex items-center gap-1">
+                                <span className="w-1.5 h-1.5 bg-red-500 rounded-full"></span>
+                                Отменен / Возвращен
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Order info details */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                          <div>
+                            <span className="text-slate-400 font-semibold block mb-0.5">Покупатель (Паспорт)</span>
+                            <span className="font-mono font-bold text-slate-800 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{inv.receiver_passport}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400 font-semibold block mb-0.5">Сумма к зачислению</span>
+                            <span className="text-sm font-black text-slate-800">{inv.amount.toLocaleString('ru-RU')} <span className="text-purple-700 font-bold">{"}|{"}</span></span>
+                          </div>
+                          <div className="md:col-span-1">
+                            <span className="text-slate-400 font-semibold block mb-0.5">Время транзакции</span>
+                            <span className="font-semibold text-slate-600">{inv.created_at ? new Date(inv.created_at).toLocaleString('ru-RU') : 'Только что'}</span>
+                          </div>
+                        </div>
+
+                        {/* Delivery address & goods info */}
+                        <div className="bg-slate-50 border border-slate-100 p-3 rounded-lg text-xs">
+                          <span className="text-slate-400 font-bold uppercase tracking-wider block mb-1">Сведения о заказе и доставке:</span>
+                          <p className="font-medium text-slate-700 whitespace-pre-wrap leading-relaxed">
+                            {inv.description}
+                          </p>
+                        </div>
+
+                        {/* Action buttons */}
+                        {inv.status !== 'cancelled' && (
+                          <div className="flex justify-end pt-1">
+                            <button
+                              onClick={() => handleDeclineOrder(inv.id)}
+                              className="bg-red-50 text-red-600 hover:bg-red-600 hover:text-white border border-red-200 hover:border-red-600 p-2 px-4 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all shadow-sm"
+                            >
+                              <XCircle className="w-4 h-4" />
+                              <span>Отказаться от заказа / Вернуть средства</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           /* VIEW: HOMEPAGE / CATALOG */
@@ -825,75 +1096,90 @@ export default function App() {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5">
-                  {displayedProducts.map((p) => (
-                    <div
-                      key={p.id}
-                      className="bg-white rounded-xl overflow-hidden border border-slate-100 hover:border-slate-200 shadow-sm hover:shadow-lg transition-all duration-300 flex flex-col group cursor-pointer"
-                      onClick={() => setSelectedProduct(p)}
-                    >
-                      {/* Product Image */}
-                      <div className="relative h-48 overflow-hidden bg-slate-50 flex items-center justify-center">
-                        <img
-                          src={p.image_url}
-                          alt={p.name}
-                          className="w-full h-full object-cover group-hover:scale-105 transition-all duration-500"
-                        />
-                        {p.price > 30000 && (
-                          <span className="absolute top-2.5 left-2.5 bg-orange-500 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded tracking-wider shadow-sm">
-                            Топ продаж
-                          </span>
-                        )}
-                        <span className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-md text-white text-[10px] font-semibold px-2 py-1 rounded">
-                          {p.category}
-                        </span>
-                      </div>
+                  {displayedProducts.map((p) => {
+                    const isSeed = p.id.startsWith('seed-');
+                    const images = parseProductImages(p.image_url);
 
-                      {/* Info & Action */}
-                      <div className="p-4 flex-grow flex flex-col justify-between">
-                        <div>
-                          {/* Rating & reviews mock */}
-                          <div className="flex items-center gap-1 text-amber-500 text-xs mb-1.5 font-bold">
-                            <div className="flex">
-                              <Star className="w-3.5 h-3.5 fill-current" />
-                              <Star className="w-3.5 h-3.5 fill-current" />
-                              <Star className="w-3.5 h-3.5 fill-current" />
-                              <Star className="w-3.5 h-3.5 fill-current" />
-                              <Star className="w-3.5 h-3.5 fill-current" />
-                            </div>
-                            <span className="text-slate-400 font-medium">(12 отзывов)</span>
-                          </div>
-
-                          <h4 className="font-extrabold text-[#522b82] group-hover:text-purple-900 text-sm line-clamp-2 leading-tight min-h-[40px]">
-                            {p.name}
-                          </h4>
-
-                          <p className="text-xs text-slate-400 mt-1 line-clamp-2">
-                            {p.description}
-                          </p>
-                        </div>
-
-                        <div className="mt-4 flex items-center justify-between pt-2 border-t border-slate-50">
-                          <div>
-                            <span className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider">Цена</span>
-                            <span className="text-lg font-black text-slate-800">
-                              {p.price.toLocaleString('ru-RU')} <span className="text-purple-700 font-bold">{"}|{"}</span>
+                    return (
+                      <div
+                        key={p.id}
+                        className="bg-white rounded-xl overflow-hidden border border-slate-100 hover:border-slate-200 shadow-sm hover:shadow-lg transition-all duration-300 flex flex-col group cursor-pointer"
+                        onClick={() => setSelectedProduct(p)}
+                      >
+                        {/* Product Image */}
+                        <div className="relative h-48 overflow-hidden bg-slate-50 flex items-center justify-center">
+                          <img
+                            src={images[0]}
+                            alt={p.name}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-all duration-500"
+                          />
+                          {isSeed ? (
+                            <span className="absolute top-2.5 left-2.5 bg-purple-600 text-white text-[9px] font-bold uppercase px-2 py-0.5 rounded tracking-wider shadow-sm">
+                              Выставочный демо
                             </span>
+                          ) : (
+                            <span className="absolute top-2.5 left-2.5 bg-orange-500 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded tracking-wider shadow-sm">
+                              Товар продавца
+                            </span>
+                          )}
+                          <span className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-md text-white text-[10px] font-semibold px-2 py-1 rounded">
+                            {p.category}
+                          </span>
+                        </div>
+
+                        {/* Info & Action */}
+                        <div className="p-4 flex-grow flex flex-col justify-between">
+                          <div>
+                            {/* Rating & reviews mock */}
+                            <div className="flex items-center gap-1 text-amber-500 text-xs mb-1.5 font-bold">
+                              <div className="flex">
+                                <Star className="w-3.5 h-3.5 fill-current" />
+                                <Star className="w-3.5 h-3.5 fill-current" />
+                                <Star className="w-3.5 h-3.5 fill-current" />
+                                <Star className="w-3.5 h-3.5 fill-current" />
+                                <Star className="w-3.5 h-3.5 fill-current" />
+                              </div>
+                              <span className="text-slate-400 font-medium">(12 отзывов)</span>
+                            </div>
+
+                            <h4 className="font-extrabold text-[#522b82] group-hover:text-purple-900 text-sm line-clamp-2 leading-tight min-h-[40px]">
+                              {p.name}
+                            </h4>
+
+                            <p className="text-xs text-slate-400 mt-1 line-clamp-2">
+                              {p.description}
+                            </p>
                           </div>
 
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              addToCart(p);
-                            }}
-                            className="bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white p-2 px-3.5 rounded-lg font-bold text-xs flex items-center gap-1.5 transition shadow-sm"
-                          >
-                            <ShoppingCart className="w-4 h-4" />
-                            <span>Купить</span>
-                          </button>
+                          <div className="mt-4 flex items-center justify-between pt-2 border-t border-slate-50">
+                            <div>
+                              <span className="block text-[10px] uppercase font-bold text-slate-400 tracking-wider">Цена</span>
+                              <span className="text-lg font-black text-slate-800">
+                                {p.price.toLocaleString('ru-RU')} <span className="text-purple-700 font-bold">{"}|{"}</span>
+                              </span>
+                            </div>
+
+                            {isSeed ? (
+                              <span className="text-[10px] text-slate-400 bg-slate-100 font-bold px-2 py-1.5 rounded-lg border border-slate-200">
+                                Демо-просмотр
+                              </span>
+                            ) : (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  addToCart(p);
+                                }}
+                                className="bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white p-2 px-3.5 rounded-lg font-bold text-xs flex items-center gap-1.5 transition shadow-sm"
+                              >
+                                <ShoppingCart className="w-4 h-4" />
+                                <span>Купить</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
@@ -1018,103 +1304,151 @@ export default function App() {
       )}
 
       {/* DETAIL MODAL FOR PRODUCT */}
-      {selectedProduct && (
-        <div className="fixed inset-0 bg-black/65 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto">
-          <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full overflow-hidden border border-slate-100 flex flex-col max-h-[90vh]">
+      {selectedProduct && (() => {
+        const images = parseProductImages(selectedProduct.image_url);
+        const isSeed = selectedProduct.id.startsWith('seed-');
 
-            {/* Header */}
-            <div className="bg-slate-100 px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">{selectedProduct.category}</span>
-              <button
-                onClick={() => setSelectedProduct(null)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 hover:bg-slate-200 rounded-full transition"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+        return (
+          <div className="fixed inset-0 bg-black/65 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto">
+            <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full overflow-hidden border border-slate-100 flex flex-col max-h-[90vh]">
 
-            {/* Content body */}
-            <div className="overflow-y-auto p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
-
-              {/* Left Side: Image */}
-              <div className="bg-slate-50 rounded-xl overflow-hidden border border-slate-100 flex items-center justify-center h-[300px] md:h-full max-h-[380px]">
-                <img
-                  src={selectedProduct.image_url}
-                  alt={selectedProduct.name}
-                  className="w-full h-full object-cover"
-                />
+              {/* Header */}
+              <div className="bg-slate-100 px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">{selectedProduct.category}</span>
+                <button
+                  onClick={() => setSelectedProduct(null)}
+                  className="text-slate-400 hover:text-slate-600 p-1.5 hover:bg-slate-200 rounded-full transition"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
 
-              {/* Right Side: Details */}
-              <div className="flex flex-col justify-between">
-                <div>
-                  <h3 className="text-xl md:text-2xl font-black text-[#522b82] tracking-tight leading-tight">
-                    {selectedProduct.name}
-                  </h3>
+              {/* Content body */}
+              <div className="overflow-y-auto p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
 
-                  {/* Reviews Mock Info */}
-                  <div className="flex items-center gap-1 text-amber-500 text-sm mt-2 font-bold">
-                    <div className="flex">
-                      <Star className="w-4 h-4 fill-current" />
-                      <Star className="w-4 h-4 fill-current" />
-                      <Star className="w-4 h-4 fill-current" />
-                      <Star className="w-4 h-4 fill-current" />
-                      <Star className="w-4 h-4 fill-current" />
+                {/* Left Side: Image Carousel */}
+                <div className="flex flex-col gap-3">
+                  <div className="relative bg-slate-50 rounded-xl overflow-hidden border border-slate-100 flex items-center justify-center h-[260px] md:h-[320px]">
+                    <img
+                      src={images[detailsImgIndex]}
+                      alt={selectedProduct.name}
+                      className="w-full h-full object-cover"
+                    />
+
+                    {images.length > 1 && (
+                      <>
+                        <button
+                          onClick={() => setDetailsImgIndex((prev) => (prev - 1 + images.length) % images.length)}
+                          className="absolute left-2 bg-black/40 hover:bg-black/60 p-1 rounded-full text-white shadow-md transition"
+                        >
+                          <ChevronLeft className="w-5 h-5" />
+                        </button>
+                        <button
+                          onClick={() => setDetailsImgIndex((prev) => (prev + 1) % images.length)}
+                          className="absolute right-2 bg-black/40 hover:bg-black/60 p-1 rounded-full text-white shadow-md transition"
+                        >
+                          <ChevronRight className="w-5 h-5" />
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Thumbnail Row */}
+                  {images.length > 1 && (
+                    <div className="flex gap-2 justify-center overflow-x-auto py-1">
+                      {images.map((img, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => setDetailsImgIndex(idx)}
+                          className={`w-12 h-12 rounded-md overflow-hidden border-2 transition-all ${detailsImgIndex === idx ? 'border-[#522b82] scale-105' : 'border-slate-200 hover:border-slate-300'}`}
+                        >
+                          <img src={img} alt="Thumb" className="w-full h-full object-cover" />
+                        </button>
+                      ))}
                     </div>
-                    <span className="text-slate-500 font-semibold">(5.0 из 5, 12 голосов)</span>
-                  </div>
-
-                  <div className="mt-4 bg-purple-50 rounded-lg p-3 border border-purple-100 text-xs text-purple-900 flex items-center gap-2">
-                    <ShieldCheck className="w-5 h-5 text-purple-700 flex-shrink-0" />
-                    <span>Продавец верифицирован: <strong className="font-mono font-bold text-slate-800">{selectedProduct.seller_passport}</strong></span>
-                  </div>
-
-                  <div className="mt-4">
-                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Описание товара</h4>
-                    <p className="text-sm text-slate-600 leading-relaxed mt-1 whitespace-pre-line">
-                      {selectedProduct.description}
-                    </p>
-                  </div>
-
-                  <div className="mt-4 grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded-lg text-xs">
-                    <div>
-                      <span className="text-slate-400 font-semibold">Доставка по Ирновии</span>
-                      <p className="font-bold text-slate-700 mt-0.5">Бесплатно (Почта)</p>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 font-semibold">Гарантия</span>
-                      <p className="font-bold text-slate-700 mt-0.5">30 дней возврата</p>
-                    </div>
-                  </div>
+                  )}
                 </div>
 
-                <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between gap-4">
+                {/* Right Side: Details */}
+                <div className="flex flex-col justify-between">
                   <div>
-                    <span className="text-xs text-slate-400 font-bold uppercase block">Общая стоимость</span>
-                    <span className="text-2xl md:text-3xl font-black text-slate-800">
-                      {selectedProduct.price.toLocaleString('ru-RU')} <span className="text-[#522b82]">{"}|{"}</span>
-                    </span>
+                    <h3 className="text-xl md:text-2xl font-black text-[#522b82] tracking-tight leading-tight">
+                      {selectedProduct.name}
+                    </h3>
+
+                    {/* Reviews Mock Info */}
+                    <div className="flex items-center gap-1 text-amber-500 text-sm mt-2 font-bold">
+                      <div className="flex">
+                        <Star className="w-4 h-4 fill-current" />
+                        <Star className="w-4 h-4 fill-current" />
+                        <Star className="w-4 h-4 fill-current" />
+                        <Star className="w-4 h-4 fill-current" />
+                        <Star className="w-4 h-4 fill-current" />
+                      </div>
+                      <span className="text-slate-500 font-semibold">(5.0 из 5, 12 голосов)</span>
+                    </div>
+
+                    <div className="mt-4 bg-purple-50 rounded-lg p-3 border border-purple-100 text-xs text-purple-900 flex items-center gap-2">
+                      <ShieldCheck className="w-5 h-5 text-[#522b82] flex-shrink-0" />
+                      <span>Продавец верифицирован: <strong className="font-mono font-bold text-slate-800">{selectedProduct.seller_passport}</strong></span>
+                    </div>
+
+                    <div className="mt-4">
+                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Описание товара</h4>
+                      <p className="text-sm text-slate-600 leading-relaxed mt-1 whitespace-pre-line">
+                        {selectedProduct.description}
+                      </p>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded-lg text-xs">
+                      <div>
+                        <span className="text-slate-400 font-semibold">Доставка по Ирновии</span>
+                        <p className="font-bold text-slate-700 mt-0.5">Бесплатно (Почта)</p>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 font-semibold">Гарантия</span>
+                        <p className="font-bold text-slate-700 mt-0.5">30 дней возврата</p>
+                      </div>
+                    </div>
                   </div>
 
-                  <button
-                    onClick={() => {
-                      addToCart(selectedProduct);
-                      setSelectedProduct(null);
-                    }}
-                    className="bg-[#ff5a00] hover:bg-orange-600 active:bg-orange-700 text-white font-black px-8 py-3.5 rounded-xl shadow-lg hover:shadow-orange-200 transition-all text-sm uppercase tracking-wide flex items-center gap-2"
-                  >
-                    <ShoppingCart className="w-5 h-5 stroke-[2.5]" />
-                    <span>В корзину</span>
-                  </button>
+                  <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between gap-4">
+                    <div>
+                      <span className="text-xs text-slate-400 font-bold uppercase block">Общая стоимость</span>
+                      <span className="text-2xl md:text-3xl font-black text-slate-800">
+                        {selectedProduct.price.toLocaleString('ru-RU')} <span className="text-[#522b82]">{"}|{"}</span>
+                      </span>
+                    </div>
+
+                    {isSeed ? (
+                      <button
+                        disabled
+                        className="bg-slate-300 text-slate-500 font-bold px-6 py-3.5 rounded-xl cursor-not-allowed text-xs"
+                      >
+                        Только демонстрация
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          addToCart(selectedProduct);
+                          setSelectedProduct(null);
+                        }}
+                        className="bg-[#ff5a00] hover:bg-orange-600 active:bg-orange-700 text-white font-black px-8 py-3.5 rounded-xl shadow-lg hover:shadow-orange-200 transition-all text-sm uppercase tracking-wide flex items-center gap-2"
+                      >
+                        <ShoppingCart className="w-5 h-5 stroke-[2.5]" />
+                        <span>В корзину</span>
+                      </button>
+                    )}
+                  </div>
+
                 </div>
 
               </div>
 
             </div>
-
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* SHOPPING CART & CHECKOUT DRAWER */}
       {isCartOpen && (
@@ -1156,7 +1490,7 @@ export default function App() {
                   </div>
                   <h4 className="text-xl font-black text-emerald-800">Заказ успешно оплачен!</h4>
                   <p className="text-sm text-slate-500 max-w-xs mx-auto">
-                    Счет успешно подтвержден в Национальном Банке Ирновии. Ваши товары отправлены продавцом на ваш адрес. Спасибо за доверие!
+                    Счет успешно подтвержден в Национальном Банке Ирновии. Ваши товары отправлены продавцом на ваши координаты. Спасибо за покупку!
                   </p>
                   <button
                     onClick={() => {
@@ -1171,7 +1505,7 @@ export default function App() {
                 </div>
 
               ) : paymentPolling ? (
-                /* 2. POLLING INVOICE STATE */
+                /* 2. POLLING INVOICE STATE (WITHOUT SIMULATION OVERLAYS - AS DIRECTED) */
                 <div className="flex flex-col items-center justify-center h-full text-center space-y-5 py-6">
                   <div className="relative">
                     <div className="w-16 h-16 border-4 border-purple-200 border-t-purple-700 rounded-full animate-spin"></div>
@@ -1196,7 +1530,7 @@ export default function App() {
                       <strong className="font-mono text-slate-700">{createdInvoice?.sender_passport}</strong>
                     </p>
 
-                    <div className="text-center py-1">
+                    <div className="text-center py-2">
                       <p className="text-sm font-bold text-emerald-700 mb-1">{paymentBuyerName}, подтверждаем ваш заказ...</p>
                       <p className="text-[11px] font-semibold text-purple-800 animate-pulse">
                         Ожидаем подтверждения оплаты в вашем приложении Нацбанка...
@@ -1204,22 +1538,9 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Sandboxed Fast Tester Help for Instructors */}
-                  <div className="border border-amber-200 bg-amber-50 p-4 rounded-xl text-left text-xs w-full space-y-2">
-                    <div className="flex gap-1.5 text-amber-900 font-bold">
-                      <Sparkles className="w-4 h-4 text-amber-600 flex-shrink-0" />
-                      <span>Имитация терминала банка</span>
-                    </div>
-                    <p className="text-slate-600">Чтобы проверить платеж прямо сейчас без захода в отдельное приложение Нацбанка, нажмите кнопку ниже для симуляции одобрения:</p>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={simulatePaymentSuccess}
-                        className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 rounded text-center transition shadow-sm"
-                      >
-                        [ Имитировать Оплату ]
-                      </button>
-                    </div>
-                  </div>
+                  <p className="text-xs text-slate-400 max-w-xs mx-auto">
+                    Зайдите в официальное банковское приложение Нацбанка Ирновии на вашем телефоне и подтвердите выставленный счет.
+                  </p>
 
                   <button
                     onClick={() => {
@@ -1228,7 +1549,7 @@ export default function App() {
                     }}
                     className="text-xs text-red-500 hover:text-red-700 font-bold underline cursor-pointer pt-4"
                   >
-                    Отменить и вернуться назад
+                    Отменить транзакцию
                   </button>
                 </div>
 
@@ -1246,48 +1567,52 @@ export default function App() {
                   {/* Cart Items List */}
                   <div className="space-y-3">
                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider border-b border-slate-100 pb-1">Выбранные товары</h4>
-                    {cart.map((item) => (
-                      <div key={item.product.id} className="flex gap-3 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
-                        <img
-                          src={item.product.image_url}
-                          alt={item.product.name}
-                          className="w-16 h-16 object-cover rounded-md bg-white border border-slate-200"
-                        />
-                        <div className="flex-grow flex flex-col justify-between">
-                          <div>
-                            <p className="text-xs font-bold text-[#522b82] line-clamp-1">{item.product.name}</p>
-                            <p className="text-xs font-black text-slate-700 mt-0.5">
-                              {item.product.price.toLocaleString('ru-RU')} {"}|{"}
-                            </p>
-                          </div>
+                    {cart.map((item) => {
+                      const images = parseProductImages(item.product.image_url);
 
-                          <div className="flex items-center justify-between mt-1">
-                            <div className="flex items-center bg-white border border-slate-200 rounded-md p-0.5 text-xs">
-                              <button
-                                onClick={() => updateQuantity(item.product.id, -1)}
-                                className="p-1 hover:bg-slate-100 rounded text-slate-500"
-                              >
-                                <Minus className="w-3 h-3" />
-                              </button>
-                              <span className="px-2 font-bold text-slate-700">{item.quantity}</span>
-                              <button
-                                onClick={() => updateQuantity(item.product.id, 1)}
-                                className="p-1 hover:bg-slate-100 rounded text-slate-500"
-                              >
-                                <Plus className="w-3 h-3" />
-                              </button>
+                      return (
+                        <div key={item.product.id} className="flex gap-3 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                          <img
+                            src={images[0]}
+                            alt={item.product.name}
+                            className="w-16 h-16 object-cover rounded-md bg-white border border-slate-200"
+                          />
+                          <div className="flex-grow flex flex-col justify-between">
+                            <div>
+                              <p className="text-xs font-bold text-[#522b82] line-clamp-1">{item.product.name}</p>
+                              <p className="text-xs font-black text-slate-700 mt-0.5">
+                                {item.product.price.toLocaleString('ru-RU')} {"}|{"}
+                              </p>
                             </div>
 
-                            <button
-                              onClick={() => removeFromCart(item.product.id)}
-                              className="text-red-500 hover:text-red-700 p-1"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                            <div className="flex items-center justify-between mt-1">
+                              <div className="flex items-center bg-white border border-slate-200 rounded-md p-0.5 text-xs">
+                                <button
+                                  onClick={() => updateQuantity(item.product.id, -1)}
+                                  className="p-1 hover:bg-slate-100 rounded text-slate-500"
+                                >
+                                  <Minus className="w-3 h-3" />
+                                </button>
+                                <span className="px-2 font-bold text-slate-700">{item.quantity}</span>
+                                <button
+                                  onClick={() => updateQuantity(item.product.id, 1)}
+                                  className="p-1 hover:bg-slate-100 rounded text-slate-500"
+                                >
+                                  <Plus className="w-3 h-3" />
+                                </button>
+                              </div>
+
+                              <button
+                                onClick={() => removeFromCart(item.product.id)}
+                                className="text-red-500 hover:text-red-700 p-1"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
 
                   {/* Checkout Form */}
@@ -1323,6 +1648,21 @@ export default function App() {
                         onChange={(e) => setCheckoutPhone(e.target.value)}
                         className="w-full border border-slate-200 rounded-lg p-2 text-xs font-semibold focus:ring-1 focus:ring-purple-400 focus:outline-none"
                       />
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Координаты доставки *</label>
+                      <div className="relative">
+                        <MapPin className="absolute left-2.5 top-2.5 w-4 h-4 text-slate-400" />
+                        <input
+                          type="text"
+                          required
+                          placeholder="Пример: X: 1450, Y: -2890 (или адрес)"
+                          value={checkoutCoordinates}
+                          onChange={(e) => setCheckoutCoordinates(e.target.value)}
+                          className="w-full border border-slate-200 rounded-lg py-2 pl-8 pr-2 text-xs font-semibold focus:ring-1 focus:ring-purple-400 focus:outline-none"
+                        />
+                      </div>
                     </div>
 
                     <div>
